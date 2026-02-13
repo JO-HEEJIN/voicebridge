@@ -1,0 +1,6 @@
+sounddevice==0.5.1
+deepgram-sdk==3.9.0
+anthropic==0.43.0
+edge-tts==7.0.2
+python-dotenv==1.1.0
+numpy==2.2.3

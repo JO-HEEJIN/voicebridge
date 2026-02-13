@@ -4,6 +4,7 @@ Manages partial and final transcripts, emitting complete sentences for translati
 """
 
 import asyncio
+from typing import Optional
 
 
 class SentenceBuffer:
@@ -36,7 +37,7 @@ class SentenceBuffer:
         # Reset the buffer after processing final
         self._buffer = ""
 
-    def get_next_sentence(self) -> str | None:
+    def get_next_sentence(self) -> Optional[str]:
         """Get the next complete sentence if available.
 
         Returns:

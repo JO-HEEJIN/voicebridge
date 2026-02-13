@@ -6,6 +6,7 @@ streaming for low latency.
 
 import asyncio
 import queue
+from typing import Optional
 import sounddevice as sd
 import numpy as np
 
@@ -19,7 +20,7 @@ class AudioCapture:
 
     def __init__(
         self,
-        device_id: int | None = None,
+        device_id: Optional[int] = None,
         sample_rate: int = 16000,
         channels: int = 1,
         chunk_size: int = 4096,

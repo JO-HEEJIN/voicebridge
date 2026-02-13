@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import sys
 import time
+from typing import Optional
 from datetime import datetime
 
 from config import Config
@@ -25,8 +26,8 @@ class Controller:
     def __init__(
         self,
         config: Config,
-        input_device: int | None,
-        output_device: int | None,
+        input_device: Optional[int],
+        output_device: Optional[int],
     ):
         """Initialize controller with configuration.
 

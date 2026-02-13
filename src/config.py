@@ -4,6 +4,7 @@ Loads configuration from .env file and validates required API keys.
 """
 
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 
@@ -16,8 +17,8 @@ class Config:
         anthropic_api_key: str,
         target_language: str = "en",
         sample_rate: int = 16000,
-        input_device: int | None = None,
-        output_device: int | None = None,
+        input_device: Optional[int] = None,
+        output_device: Optional[int] = None,
     ):
         self.deepgram_api_key = deepgram_api_key
         self.anthropic_api_key = anthropic_api_key

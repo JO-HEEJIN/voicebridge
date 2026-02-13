@@ -4,6 +4,7 @@ Plays TTS audio through configured output device (targeting BlackHole).
 """
 
 import asyncio
+from typing import Optional
 import sounddevice as sd
 import numpy as np
 
@@ -17,7 +18,7 @@ class AudioOutput:
 
     def __init__(
         self,
-        device_id: int | None = None,
+        device_id: Optional[int] = None,
         sample_rate: int = 24000,
     ):
         """Initialize audio output.

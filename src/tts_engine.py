@@ -19,7 +19,7 @@ class TTSEngine:
             voice: Voice ID for Edge TTS (e.g., "en-US-GuyNeural", "de-DE-ConradNeural")
         """
         self._voice = voice
-        self._rate = "+0%"  # Normal speech rate
+        self._rate = "+15%"  # Slightly faster for real-time feel
 
     async def synthesize(self, text: str) -> bytes:
         """Synthesize speech from text.

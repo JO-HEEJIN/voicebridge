@@ -10,7 +10,7 @@ VoiceBridge enables Korean speakers to participate in English or German video ca
 - Real-time Korean speech-to-text using Deepgram
 - Natural translation using Anthropic Claude API
 - High-quality text-to-speech with Edge TTS
-- Low latency pipeline (< 3 seconds end-to-end)
+- Optimized pipeline with Haiku translation and utterance-based buffering
 - Live language switching between English and German
 - Routes output through BlackHole virtual audio driver for video call integration
 
@@ -47,7 +47,7 @@ VoiceBridge enables Korean speakers to participate in English or German video ca
 
 ### System Requirements
 - **macOS** 13 (Ventura) or later
-- **Python** 3.11 or later
+- **Python** 3.11+ (tested with 3.13)
 - **BlackHole** virtual audio driver ([download](https://existential.audio/blackhole/))
 - **ffmpeg** for audio conversion (`brew install ffmpeg`)
 
@@ -64,8 +64,8 @@ VoiceBridge enables Korean speakers to participate in English or German video ca
 git clone <your-repo-url>
 cd voice-translator
 
-# Create virtual environment
-python3.11 -m venv venv
+# Create virtual environment (use python3.11+ or python3.13)
+python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
@@ -162,12 +162,13 @@ While VoiceBridge is running:
 ### Latency Optimization
 
 VoiceBridge is designed for low latency:
-- Streaming STT (no need to wait for silence)
-- Async pipeline (parallel processing where possible)
+- Streaming STT with Deepgram's `utterance_end_ms` for smart sentence boundaries
+- Claude Haiku for fast translation (~0.5-1s)
+- Async pipeline with non-blocking audio playback
 - Sentence-level batching (balances coherence and speed)
 - Latency logging on each translation
 
-Typical end-to-end latency: **2-3 seconds** for a 10-15 syllable sentence.
+Typical end-to-end latency: **3-5 seconds** including audio playback.
 
 ## Project Structure
 

@@ -44,6 +44,7 @@ class STTEngine:
 
             # Register event handlers
             self._connection.on(LiveTranscriptionEvents.Transcript, self._on_message)
+            self._connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
             self._connection.on(LiveTranscriptionEvents.Error, self._on_error)
             self._connection.on(LiveTranscriptionEvents.Close, self._on_close)
 
@@ -56,6 +57,8 @@ class STTEngine:
                 encoding="linear16",
                 sample_rate=16000,
                 channels=1,
+                utterance_end_ms="1500",
+                endpointing=500,
             )
 
             # Start the connection
@@ -77,7 +80,7 @@ class STTEngine:
         """
         if self._connection:
             try:
-                self._connection.send(chunk)
+                await self._connection.send(chunk)
             except Exception as e:
                 print(f"Error sending audio: {e}", file=sys.stderr)
 
@@ -89,6 +92,10 @@ class STTEngine:
         """
         self._callback = callback
 
+    def on_utterance_end(self, callback: Callable[[], None]):
+        """Register callback for utterance end events."""
+        self._utterance_end_callback = callback
+
     async def close(self):
         """Close the Deepgram connection."""
         self._is_closing = True
@@ -99,9 +106,10 @@ class STTEngine:
             except Exception as e:
                 print(f"Error closing STT: {e}", file=sys.stderr)
 
-    def _on_message(self, _self, result, **_kwargs):
+    async def _on_message(self, *args, **kwargs):
         """Handle incoming transcript from Deepgram."""
         try:
+            result = args[1] if len(args) > 1 else kwargs.get("result")
             if not result or not result.channel:
                 return
 
@@ -115,11 +123,17 @@ class STTEngine:
         except Exception as e:
             print(f"Error processing transcript: {e}", file=sys.stderr)
 
-    def _on_error(self, _self, error, **_kwargs):
+    async def _on_utterance_end(self, *args, **kwargs):
+        """Handle utterance end event from Deepgram."""
+        if hasattr(self, '_utterance_end_callback') and self._utterance_end_callback:
+            self._utterance_end_callback()
+
+    async def _on_error(self, *args, **kwargs):
         """Handle Deepgram errors."""
+        error = args[1] if len(args) > 1 else kwargs.get("error")
         print(f"Deepgram error: {error}", file=sys.stderr)
 
-    def _on_close(self, _self, _close, **_kwargs):
+    async def _on_close(self, *args, **kwargs):
         """Handle connection close and attempt reconnection."""
         if self._is_closing:
             return

@@ -54,14 +54,7 @@ class AudioOutput:
             # Normalize to float32 range [-1.0, 1.0] for playback
             audio_float = audio_array.astype(np.float32) / 32768.0
 
-            # Create a future to wait for playback completion
-            event = asyncio.Event()
-
-            def callback():
-                """Called when playback finishes."""
-                event.set()
-
-            # Play audio (blocking call in sync context)
+            # Play audio
             sd.play(
                 audio_float,
                 samplerate=self.sample_rate,
@@ -69,5 +62,6 @@ class AudioOutput:
                 blocking=False,
             )
 
-            # Wait for playback to complete
-            sd.wait()
+            # Wait without blocking the event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sd.wait)

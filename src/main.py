@@ -105,9 +105,17 @@ class Controller:
 
         self.stt.on_transcript(on_transcript)
 
+        # Flush buffer when Deepgram detects end of utterance
+        self.stt.on_utterance_end(lambda: self.buffer.flush())
+
         # Register audio callback to send to STT
+        # Note: sounddevice callback runs in a separate C thread,
+        # so we must use run_coroutine_threadsafe instead of create_task
+        loop = asyncio.get_running_loop()
         self.audio_capture.on_audio_data(
-            lambda chunk: asyncio.create_task(self.stt.send_audio(chunk))
+            lambda chunk: asyncio.run_coroutine_threadsafe(
+                self.stt.send_audio(chunk), loop
+            )
         )
 
         print("[SYSTEM] Pipeline started. Start speaking in Korean...\n")
@@ -134,7 +142,7 @@ class Controller:
                     await self._process_sentence(sentence)
 
             # Small delay to avoid busy waiting
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
 
     async def _process_sentence(self, korean_text: str):
         """Process a single sentence through the translation pipeline.
@@ -263,8 +271,8 @@ async def main():
             controller.handle_keyboard(),
         )
 
-    except KeyboardInterrupt:
-        print("\n[SYSTEM] Interrupt received.")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
     finally:

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Main controller for VoiceBridge - Real-Time Voice Translation Tool.
 
-Orchestrates the full pipeline from microphone input to translated audio output.
+Push-to-talk pipeline: Space to record → Whisper STT → Claude translate → KittenTTS.
 """
 
 import argparse
 import asyncio
 import sys
+import tty
+import termios
 import time
 from typing import Optional
-from datetime import datetime
 
 from config import Config
 from audio_capture import AudioCapture
 from audio_output import AudioOutput
 from stt_engine import STTEngine
-from sentence_buffer import SentenceBuffer
 from translator import Translator
 from tts_engine import TTSEngine
 
@@ -23,254 +23,214 @@ from tts_engine import TTSEngine
 class Controller:
     """Main controller orchestrating the VoiceBridge pipeline."""
 
-    def __init__(
-        self,
-        config: Config,
-        input_device: Optional[int],
-        output_device: Optional[int],
-    ):
-        """Initialize controller with configuration.
-
-        Args:
-            config: Application configuration
-            input_device: Input device ID (None = default)
-            output_device: Output device ID (None = default)
-        """
+    def __init__(self, config: Config, input_device: Optional[int], output_device: Optional[int]):
         self.config = config
         self.target_language = config.target_language
         self.is_running = False
+        self._recording = False
+        self._last_toggle_time = 0.0
+        self._audio_chunks = []  # buffer recorded audio
 
         # Initialize modules
         self.audio_capture = AudioCapture(
             device_id=input_device,
             sample_rate=config.sample_rate,
         )
-        self.audio_output = AudioOutput(device_id=output_device)
-        self.stt = STTEngine(config.deepgram_api_key)
-        self.buffer = SentenceBuffer()
+        self.audio_output = AudioOutput(device_id=output_device, sample_rate=24000)
+        self.stt = STTEngine(model_size="small")
         self.translator = Translator(
             config.anthropic_api_key,
             target_language=self.target_language,
         )
         self.tts = TTSEngine(voice=self._get_voice_for_language(self.target_language))
 
+        self._pending_audio = asyncio.Queue()
+
     def _get_voice_for_language(self, lang: str) -> str:
-        """Get TTS voice ID for target language.
-
-        Args:
-            lang: Language code ("en" or "de")
-
-        Returns:
-            Voice ID string for Edge TTS
-        """
-        return "en-US-GuyNeural" if lang == "en" else "de-DE-ConradNeural"
+        # KittenTTS voices: Bella, Luna, Rosie, Kiki (female), Jasper, Bruno, Hugo, Leo (male)
+        return "Bella"
 
     def _display_header(self):
-        """Display terminal header with current state."""
         lang_name = "English" if self.target_language == "en" else "German"
-        status = "Listening" if self.is_running else "Stopped"
         print("\n" + "=" * 60)
-        print(f"VoiceBridge v1.0 | Target: {lang_name} | Status: {status}")
+        print(f"VoiceBridge v1.0 | Target: {lang_name}")
         print("=" * 60)
-        print("Commands: [q]uit | [l]anguage toggle | [c]lear buffer")
-        print("=" * 60 + "\n")
+        print("[Space] Start/Stop recording")
+        print("[q] Quit  [l] Language  [c] Clear")
+        print("=" * 60)
 
     def toggle_language(self):
-        """Toggle between English and German target languages."""
         self.target_language = "de" if self.target_language == "en" else "en"
         self.translator.set_target_language(self.target_language)
         self.tts.set_voice(self._get_voice_for_language(self.target_language))
         lang_name = "English" if self.target_language == "en" else "German"
-        print(f"\n[SYSTEM] Language toggled to {lang_name}\n")
+        print(f"\n[SYSTEM] Language: {lang_name}")
 
     async def start(self):
-        """Start the VoiceBridge pipeline."""
         self.is_running = True
         self._display_header()
 
-        # Start audio modules
+        loop = asyncio.get_running_loop()
+
+        # Load models (Whisper + KittenTTS)
+        await loop.run_in_executor(None, self.stt.load)
+        await loop.run_in_executor(None, self.tts.load)
+
+        # Start audio capture
         self.audio_capture.start()
         self.audio_output.start()
 
-        # Connect STT engine
-        print("[SYSTEM] Connecting to Deepgram...", file=sys.stderr)
-        await self.stt.connect()
+        # Collect audio chunks when recording
+        self.audio_capture.on_audio_data(self._on_audio)
 
-        # Register STT callback to feed sentence buffer
-        def on_transcript(text: str, is_final: bool):
-            if is_final:
-                self.buffer.add_final(text)
-            else:
-                self.buffer.add_partial(text)
+        print("\nPress [Space] to start speaking...\n")
 
-        self.stt.on_transcript(on_transcript)
-
-        # Flush buffer when Deepgram detects end of utterance
-        self.stt.on_utterance_end(lambda: self.buffer.flush())
-
-        # Register audio callback to send to STT
-        # Note: sounddevice callback runs in a separate C thread,
-        # so we must use run_coroutine_threadsafe instead of create_task
-        loop = asyncio.get_running_loop()
-        self.audio_capture.on_audio_data(
-            lambda chunk: asyncio.run_coroutine_threadsafe(
-                self.stt.send_audio(chunk), loop
-            )
-        )
-
-        print("[SYSTEM] Pipeline started. Start speaking in Korean...\n")
+    def _on_audio(self, chunk: bytes):
+        """Buffer audio chunks while recording."""
+        if self._recording:
+            self._audio_chunks.append(chunk)
 
     async def stop(self):
-        """Stop the VoiceBridge pipeline and clean up."""
         self.is_running = False
         print("\n[SYSTEM] Shutting down...")
-
-        # Clean up in reverse order
         self.audio_capture.stop()
-        await self.stt.close()
         self.audio_output.stop()
+        print("[SYSTEM] Done.")
 
-        print("[SYSTEM] Shutdown complete.")
+    def _start_recording(self):
+        self._recording = True
+        self._audio_chunks.clear()
+        print("[REC] Speak now...")
+
+    def _stop_recording(self):
+        self._recording = False
+        if self._audio_chunks:
+            audio_data = b"".join(self._audio_chunks)
+            self._audio_chunks.clear()
+            self._pending_audio.put_nowait(audio_data)
+        else:
+            print("[SYSTEM] No audio recorded.\n")
+            print("Press [Space] to start speaking...\n")
 
     async def run_pipeline(self):
-        """Main pipeline loop processing sentences."""
+        """Process recorded audio through the full pipeline."""
+        loop = asyncio.get_running_loop()
+
         while self.is_running:
-            # Check if a complete sentence is ready
-            if self.buffer.is_ready():
-                sentence = self.buffer.get_next_sentence()
-                if sentence:
-                    await self._process_sentence(sentence)
+            try:
+                audio_data = await asyncio.wait_for(
+                    self._pending_audio.get(), timeout=0.1
+                )
+            except asyncio.TimeoutError:
+                continue
 
-            # Small delay to avoid busy waiting
-            await asyncio.sleep(0.05)
+            start_time = time.time()
 
-    async def _process_sentence(self, korean_text: str):
-        """Process a single sentence through the translation pipeline.
+            # STT (local Whisper - run in executor to not block)
+            stt_start = time.time()
+            korean_text = await loop.run_in_executor(
+                None, self.stt.transcribe, audio_data
+            )
+            stt_time = time.time() - stt_start
 
-        Args:
-            korean_text: Korean text to translate and speak
-        """
-        # Start latency measurement
-        start_time = time.time()
+            if not korean_text:
+                print("[SYSTEM] No speech detected.\n")
+                print("Press [Space] to start speaking...\n")
+                continue
 
-        # Display original Korean text
-        print(f"[STT] {korean_text}")
+            print(f"[STT] {korean_text}  ({stt_time:.1f}s)")
 
-        # Translate
-        translate_start = time.time()
-        translated = await self.translator.translate(korean_text)
-        translate_time = time.time() - translate_start
+            # Translate
+            translate_start = time.time()
+            translated = await self.translator.translate(korean_text)
+            translate_time = time.time() - translate_start
 
-        if not translated:
-            print("[ERROR] Translation failed, skipping sentence\n")
-            return
+            if not translated:
+                print("[ERROR] Translation failed\n")
+                continue
 
-        print(f"[TRS] {translated}")
+            print(f"[TRS] {translated}")
 
-        # Synthesize speech
-        tts_start = time.time()
-        audio_data = await self.tts.synthesize(translated)
-        tts_time = time.time() - tts_start
+            # TTS (local KittenTTS - run in executor)
+            tts_start = time.time()
+            audio_out = await loop.run_in_executor(
+                None, self.tts.synthesize, translated
+            )
+            tts_time = time.time() - tts_start
 
-        if not audio_data:
-            print("[ERROR] TTS failed, skipping sentence\n")
-            return
+            if not audio_out:
+                print("[ERROR] TTS failed\n")
+                continue
 
-        # Play audio
-        print("[TTS] Playing audio...")
-        playback_start = time.time()
-        await self.audio_output.play(audio_data)
-        playback_time = time.time() - playback_start
+            # Play
+            playback_start = time.time()
+            await self.audio_output.play(audio_out)
+            playback_time = time.time() - playback_start
 
-        # Calculate total latency
-        total_time = time.time() - start_time
-
-        # Log latency breakdown
-        print(
-            f"[LATENCY] Total: {total_time:.2f}s "
-            f"(Translate: {translate_time:.2f}s, "
-            f"TTS: {tts_time:.2f}s, "
-            f"Playback: {playback_time:.2f}s)\n"
-        )
+            total = time.time() - start_time
+            print(
+                f"[TIME] {total:.1f}s "
+                f"(STT:{stt_time:.1f}s T:{translate_time:.1f}s "
+                f"TTS:{tts_time:.1f}s P:{playback_time:.1f}s)"
+            )
+            print("\nPress [Space] to start speaking...\n")
 
     async def handle_keyboard(self):
-        """Handle keyboard input in a non-blocking way."""
-        loop = asyncio.get_event_loop()
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
 
-        while self.is_running:
-            # Read from stdin without blocking (simple polling approach)
-            try:
-                # Use asyncio to run blocking stdin read in executor
-                key = await loop.run_in_executor(
-                    None, sys.stdin.read, 1
-                )
+        try:
+            tty.setcbreak(fd)
+            loop = asyncio.get_running_loop()
 
-                if key == 'q':
-                    print("\n[SYSTEM] Quit command received.")
+            while self.is_running:
+                ch = await loop.run_in_executor(None, lambda: sys.stdin.read(1))
+
+                if ch == ' ':
+                    now = time.monotonic()
+                    if now - self._last_toggle_time < 0.5:
+                        continue
+                    self._last_toggle_time = now
+                    if self._recording:
+                        self._stop_recording()
+                    else:
+                        self._start_recording()
+                elif ch == 'q':
+                    print("\n[SYSTEM] Quit.")
                     self.is_running = False
                     break
-                elif key == 'l':
+                elif ch == 'l':
                     self.toggle_language()
-                elif key == 'c':
-                    self.buffer.clear()
-                    print("\n[SYSTEM] Buffer cleared.\n")
+                elif ch == 'c':
+                    self._audio_chunks.clear()
+                    print("\n[SYSTEM] Cleared.\n")
 
-            except Exception:
-                # Ignore errors from stdin
-                pass
-
-            await asyncio.sleep(0.1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 async def main():
-    """Main entry point for VoiceBridge."""
-    parser = argparse.ArgumentParser(
-        description="VoiceBridge - Real-Time Voice Translation Tool"
-    )
-    parser.add_argument(
-        "--target",
-        choices=["en", "de"],
-        default="en",
-        help="Target language: en (English) or de (German)",
-    )
-    parser.add_argument(
-        "--input-device",
-        type=int,
-        help="Input device ID (use verify_setup.py to list devices)",
-    )
-    parser.add_argument(
-        "--output-device",
-        type=int,
-        help="Output device ID (use verify_setup.py to list devices)",
-    )
-
+    parser = argparse.ArgumentParser(description="VoiceBridge - Voice Translation")
+    parser.add_argument("--target", choices=["en", "de"], default="en")
+    parser.add_argument("--input-device", type=int)
+    parser.add_argument("--output-device", type=int)
     args = parser.parse_args()
 
-    # Load configuration
     try:
         config = Config.load_from_env()
         config.target_language = args.target
     except ValueError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
+        print(f"Config error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Create controller
-    controller = Controller(
-        config,
-        input_device=args.input_device,
-        output_device=args.output_device,
-    )
+    controller = Controller(config, args.input_device, args.output_device)
 
     try:
-        # Start the pipeline
         await controller.start()
-
-        # Run pipeline and keyboard handler concurrently
         await asyncio.gather(
             controller.run_pipeline(),
             controller.handle_keyboard(),
         )
-
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     except Exception as e:

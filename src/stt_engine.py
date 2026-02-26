@@ -1,159 +1,61 @@
-"""Speech-to-Text engine using Deepgram streaming API.
+"""Speech-to-Text engine using faster-whisper (local).
 
-Provides real-time Korean speech transcription with interim and final results.
+Provides high-accuracy Korean speech transcription using OpenAI Whisper
+running locally via CTranslate2. Designed for push-to-talk batch mode.
 """
 
-import asyncio
 import sys
-from typing import Callable
-
-from deepgram import (
-    DeepgramClient,
-    DeepgramClientOptions,
-    LiveTranscriptionEvents,
-    LiveOptions,
-)
+import numpy as np
+from faster_whisper import WhisperModel
 
 
 class STTEngine:
-    """Real-time speech-to-text engine using Deepgram's streaming API."""
+    """Local speech-to-text engine using faster-whisper."""
 
-    def __init__(self, api_key: str, language: str = "ko"):
+    def __init__(self, model_size: str = "medium"):
         """Initialize the STT engine.
 
         Args:
-            api_key: Deepgram API key.
-            language: Language code for transcription (default: "ko" for Korean).
+            model_size: Whisper model size. Options:
+                "tiny", "base", "small", "medium", "large-v3"
+                Bigger = more accurate but slower.
         """
-        self._api_key = api_key
-        self._language = language
-        self._client = None
-        self._connection = None
-        self._callback = None
-        self._reconnect_count = 0
-        self._max_reconnects = 3
-        self._is_closing = False
+        self._model = None
+        self._model_size = model_size
 
-    async def connect(self):
-        """Establish WebSocket connection to Deepgram."""
-        try:
-            config = DeepgramClientOptions(options={"keepalive": "true"})
-            self._client = DeepgramClient(self._api_key, config)
+    def load(self):
+        """Load the Whisper model (one-time, may download on first run)."""
+        print(f"[SYSTEM] Loading Whisper {self._model_size} model...", file=sys.stderr)
+        self._model = WhisperModel(
+            self._model_size,
+            device="cpu",
+            compute_type="int8",
+        )
+        print("[SYSTEM] Whisper model loaded.", file=sys.stderr)
 
-            self._connection = self._client.listen.asynclive.v("1")
-
-            # Register event handlers
-            self._connection.on(LiveTranscriptionEvents.Transcript, self._on_message)
-            self._connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
-            self._connection.on(LiveTranscriptionEvents.Error, self._on_error)
-            self._connection.on(LiveTranscriptionEvents.Close, self._on_close)
-
-            # Configure streaming options
-            options = LiveOptions(
-                language=self._language,
-                model="nova-2",
-                punctuate=True,
-                interim_results=True,
-                encoding="linear16",
-                sample_rate=16000,
-                channels=1,
-                utterance_end_ms="1500",
-                endpointing=500,
-            )
-
-            # Start the connection
-            if not await self._connection.start(options):
-                raise ConnectionError("Failed to start Deepgram connection")
-
-            self._reconnect_count = 0
-            print("STT engine connected", file=sys.stderr)
-
-        except Exception as e:
-            print(f"STT connection error: {e}", file=sys.stderr)
-            raise
-
-    async def send_audio(self, chunk: bytes):
-        """Send audio data to Deepgram for transcription.
+    def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
+        """Transcribe audio bytes to Korean text.
 
         Args:
-            chunk: Raw audio bytes (16-bit PCM, 16kHz, mono).
+            audio_bytes: Raw 16-bit PCM audio bytes.
+            sample_rate: Audio sample rate in Hz.
+
+        Returns:
+            Transcribed Korean text, or empty string if nothing detected.
         """
-        if self._connection:
-            try:
-                await self._connection.send(chunk)
-            except Exception as e:
-                print(f"Error sending audio: {e}", file=sys.stderr)
+        if not self._model:
+            return ""
 
-    def on_transcript(self, callback: Callable[[str, bool], None]):
-        """Register callback for transcript results.
+        # Convert bytes to float32 numpy array
+        audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        Args:
-            callback: Function called with (text, is_final) when transcripts arrive.
-        """
-        self._callback = callback
+        segments, info = self._model.transcribe(
+            audio_np,
+            language="ko",
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
 
-    def on_utterance_end(self, callback: Callable[[], None]):
-        """Register callback for utterance end events."""
-        self._utterance_end_callback = callback
-
-    async def close(self):
-        """Close the Deepgram connection."""
-        self._is_closing = True
-        if self._connection:
-            try:
-                await self._connection.finish()
-                print("STT engine closed", file=sys.stderr)
-            except Exception as e:
-                print(f"Error closing STT: {e}", file=sys.stderr)
-
-    async def _on_message(self, *args, **kwargs):
-        """Handle incoming transcript from Deepgram."""
-        try:
-            result = args[1] if len(args) > 1 else kwargs.get("result")
-            if not result or not result.channel:
-                return
-
-            transcript = result.channel.alternatives[0].transcript
-            is_final = result.is_final
-
-            # Only process non-empty transcripts
-            if transcript and self._callback:
-                self._callback(transcript, is_final)
-
-        except Exception as e:
-            print(f"Error processing transcript: {e}", file=sys.stderr)
-
-    async def _on_utterance_end(self, *args, **kwargs):
-        """Handle utterance end event from Deepgram."""
-        if hasattr(self, '_utterance_end_callback') and self._utterance_end_callback:
-            self._utterance_end_callback()
-
-    async def _on_error(self, *args, **kwargs):
-        """Handle Deepgram errors."""
-        error = args[1] if len(args) > 1 else kwargs.get("error")
-        print(f"Deepgram error: {error}", file=sys.stderr)
-
-    async def _on_close(self, *args, **kwargs):
-        """Handle connection close and attempt reconnection."""
-        if self._is_closing:
-            return
-
-        print("Deepgram connection closed", file=sys.stderr)
-
-        if self._reconnect_count < self._max_reconnects:
-            self._reconnect_count += 1
-            print(
-                f"Attempting reconnect {self._reconnect_count}/{self._max_reconnects}...",
-                file=sys.stderr,
-            )
-            asyncio.create_task(self._reconnect())
-        else:
-            print("Max reconnection attempts reached", file=sys.stderr)
-
-    async def _reconnect(self):
-        """Attempt to reconnect to Deepgram after a delay."""
-        await asyncio.sleep(1)
-        try:
-            await self.connect()
-        except Exception as e:
-            print(f"Reconnection failed: {e}", file=sys.stderr)
+        text = " ".join(seg.text.strip() for seg in segments)
+        return text.strip()

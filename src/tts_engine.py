@@ -1,27 +1,37 @@
-"""Text-to-Speech engine using Edge TTS.
+"""Text-to-Speech engine using KittenTTS (local, no API needed).
 
-Converts text to speech audio in PCM format for playback.
+Super-tiny expressive TTS model running entirely on CPU.
 """
 
-import io
-import subprocess
 import sys
-import edge_tts
+import numpy as np
+from kittentts import KittenTTS
 
 
 class TTSEngine:
-    """Synthesizes speech from text using Edge TTS."""
+    """Synthesizes speech from text using KittenTTS locally."""
 
-    def __init__(self, voice: str = "en-US-GuyNeural"):
-        """Initialize TTS engine with voice.
+    VOICES = ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"]
+
+    def __init__(self, voice: str = "Bella", model: str = "KittenML/kitten-tts-mini-0.8"):
+        """Initialize TTS engine.
 
         Args:
-            voice: Voice ID for Edge TTS (e.g., "en-US-GuyNeural", "de-DE-ConradNeural")
+            voice: Voice name (Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo)
+            model: HuggingFace model ID
         """
         self._voice = voice
-        self._rate = "+15%"  # Slightly faster for real-time feel
+        self._model_id = model
+        self._model = None
+        self._sample_rate = 24000
 
-    async def synthesize(self, text: str) -> bytes:
+    def load(self):
+        """Load KittenTTS model (one-time, downloads on first run)."""
+        print(f"[SYSTEM] Loading KittenTTS ({self._model_id})...", file=sys.stderr)
+        self._model = KittenTTS(self._model_id)
+        print(f"[SYSTEM] KittenTTS loaded. Voice: {self._voice}", file=sys.stderr)
+
+    def synthesize(self, text: str) -> bytes:
         """Synthesize speech from text.
 
         Args:
@@ -30,81 +40,22 @@ class TTSEngine:
         Returns:
             PCM audio bytes (16-bit, 24000Hz, mono), or empty bytes on error
         """
-        if not text or not text.strip():
+        if not text or not text.strip() or not self._model:
             return b""
 
         try:
-            # Generate speech using Edge TTS (produces MP3)
-            communicate = edge_tts.Communicate(text, self._voice, rate=self._rate)
-
-            # Collect MP3 audio bytes
-            mp3_data = io.BytesIO()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    mp3_data.write(chunk["data"])
-
-            mp3_bytes = mp3_data.getvalue()
-
-            if not mp3_bytes:
-                print("TTS warning: No audio generated", file=sys.stderr)
-                return b""
-
-            # Convert MP3 to PCM using ffmpeg
-            pcm_bytes = self._mp3_to_pcm(mp3_bytes)
-            return pcm_bytes
+            audio_float = self._model.generate(text, voice=self._voice)
+            audio_int16 = (audio_float * 32767).astype(np.int16)
+            return audio_int16.tobytes()
 
         except Exception as e:
             print(f"TTS error: {e}", file=sys.stderr)
             return b""
 
-    def _mp3_to_pcm(self, mp3_data: bytes) -> bytes:
-        """Convert MP3 audio to raw PCM format.
+    def set_voice(self, voice: str):
+        """Set the TTS voice."""
+        self._voice = voice
 
-        Args:
-            mp3_data: MP3 audio bytes
-
-        Returns:
-            PCM audio bytes (16-bit, 24000Hz, mono)
-        """
-        try:
-            # Use ffmpeg to convert MP3 to PCM
-            # -f s16le: signed 16-bit little-endian PCM
-            # -ar 24000: sample rate 24000Hz
-            # -ac 1: mono (1 channel)
-            process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-i", "pipe:0",  # Read from stdin
-                    "-f", "s16le",   # Output format: signed 16-bit PCM
-                    "-ar", "24000",  # Sample rate: 24000Hz
-                    "-ac", "1",      # Channels: mono
-                    "pipe:1",        # Write to stdout
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            pcm_data, stderr = process.communicate(input=mp3_data)
-
-            if process.returncode != 0:
-                print(f"ffmpeg conversion failed: {stderr.decode()}", file=sys.stderr)
-                print("TTS warning: Returning MP3 audio (ffmpeg unavailable)", file=sys.stderr)
-                return mp3_data
-
-            return pcm_data
-
-        except FileNotFoundError:
-            print("TTS warning: ffmpeg not found, returning MP3 audio", file=sys.stderr)
-            return mp3_data
-        except Exception as e:
-            print(f"TTS conversion error: {e}", file=sys.stderr)
-            return mp3_data
-
-    def set_voice(self, voice_id: str):
-        """Set the TTS voice.
-
-        Args:
-            voice_id: Voice ID for Edge TTS (e.g., "en-US-GuyNeural", "de-DE-ConradNeural")
-        """
-        self._voice = voice_id
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate

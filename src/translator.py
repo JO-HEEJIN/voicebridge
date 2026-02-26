@@ -32,12 +32,8 @@ class Translator:
         """
         language_name = "English" if lang == "en" else "German"
         return (
-            f"You are a real-time voice translator. Translate the following Korean "
-            f"text into natural, conversational {language_name}. Rules: "
-            f"1) Produce ONLY the translation, no explanations or meta-commentary. "
-            f"2) Keep it concise - match the brevity of spoken language, not written prose. "
-            f"3) Preserve the speaker's tone and meaning. "
-            f"4) If the input is a greeting or filler, translate it naturally."
+            f"You are a Korean-to-{language_name} translator. "
+            f"Output ONLY the translation. Never add notes, explanations, or commentary."
         )
 
     async def translate(self, text: str) -> str:
@@ -55,7 +51,7 @@ class Translator:
         try:
             response = await self._client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=256,
+                max_tokens=128,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": text}],
             )
